@@ -1,18 +1,19 @@
 <?php
-// @todo add node/entity save hooks to add on the fly paragraphs reporting
-//       may need to redo how JSON is stored to append/edit current saved
-//       entries instead of bulk running entire report.
+
+/**
+ * Main Paragraphs Report controller class.
+ *
+ * @file
+ * Contains paragraphs_report.batch.inc.
+ */
 
 namespace Drupal\paragraphs_report\Controller;
 
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Component\Serialization\Json;
 use Drupal\Component\Utility\Xss;
+use Drupal\paragraphs\Entity\Paragraph;
 use Symfony\Component\DependencyInjection\ContainerInterface;
-
-// disable notices since core pager throws undefined indexes
-//error_reporting(E_ERROR | E_WARNING | E_PARSE);
-
 
 /**
  * paragraphs_report methods
@@ -43,11 +44,11 @@ class ParagraphsReport extends ControllerBase {
    * @return \Symfony\Component\HttpFoundation\RedirectResponse
    * @throws
    */
-  public function runReport() {
+  public function batchRunReport() {
     // Get all nodes to process.
-    $nodes = $this->getNodes();
+    $nids = $this->getNodes();
     // Put nodes into batches.
-    $batch = $this->batchPrep($nodes);
+    $batch = $this->batchPrep($nids);
     // Start batch api process.
     batch_set($batch);
     // Redirect page and display message on completion.
@@ -57,33 +58,33 @@ class ParagraphsReport extends ControllerBase {
   /**
    * Setup batch array var
    *
+   * @param array $nids
    * @return array of batches ready to run
    */
-  function batchPrep() {
+  function batchPrep($nids = []) {
     $moduleConfig = \Drupal::config('paragraphs_report.settings');
-    $nodes = $this->getNodes();
-    // Batch vars.
-    $totalRows        = count($nodes);
-    $rowsPerBatch     = !empty($moduleConfig->get('import_rows_per_batch')) ? $moduleConfig->get('import_rows_per_batch') : 10;
+    $totalRows = count($nids);
+    $rowsPerBatch = $moduleConfig->get('import_rows_per_batch') ?: 10;
     $batchesPerImport = ceil($totalRows / $rowsPerBatch);
     // Put x-amount of rows into operations array slots.
     $operations = [];
     for($i=0; $i<$batchesPerImport; $i++) {
       $offset = ($i==0) ? 0 : $rowsPerBatch*$i;
-      $nids = array_slice($nodes, $offset, $rowsPerBatch);
-      $operations[] = ['getParaFields', [$nids]];
+      $batchNids = array_slice($nids, $offset, $rowsPerBatch);
+      $operations[] = ['batchGetParaFields', [$batchNids]];
     }
+    $n = null;
     // Full batch array.
     $batch = [
       'init_message' => t('Executing a batch...'),
       'progress_message' => t('Operation @current out of @total batches, @perBatch per batch.',
         ['@perBatch' => $rowsPerBatch]
       ),
-      'progressive'   => TRUE,
+      'progressive' => TRUE,
       'error_message' => t('Batch failed.'),
       'operations' => $operations,
-      'finished'   => 'batchSave',
-      'file'       => drupal_get_path('module', 'paragraphs_report') . '/paragraphs_report.batch.inc',
+      'finished' => 'batchSave',
+      'file' => drupal_get_path('module', 'paragraphs_report') . '/paragraphs_report.batch.inc',
     ];
     return $batch;
   }
@@ -93,15 +94,35 @@ class ParagraphsReport extends ControllerBase {
 
 
   /**
+   * Get paragraph fields from a bundle/type.
+   *
+   * Example: node/page
+   *
+   * @param string $bundle
+   * @param string $type
+   *
+   * @return array
+   */
+  public function getParaFieldsOnType($bundle = '', $type = '') {
+    $entityManager = \Drupal::service('entity_field.manager');
+    $paraFields = [];
+    $fields = $entityManager->getFieldDefinitions($bundle, $type); // node, hero_cta
+    foreach($fields as $field_name => $field_definition) {
+      if (!empty($field_definition->getTargetBundle()) && $field_definition->getSetting('target_type') == 'paragraph') {
+        $paraFields[] = $field_name;
+      }
+    }
+    return $paraFields;
+  }
+
+  /**
    * Get paragraph fields for selected content types.
    *
    * @return array of paragraph fields by content type key
    */
   public function getParaFieldDefinitions() {
     $entityManager = \Drupal::service('entity_field.manager');
-    $moduleConfig = \Drupal::config('paragraphs_report.settings');
-    // figure out what content types were chosen in settings
-    $contentTypes = array_filter($moduleConfig->get('content_types'));
+    $contentTypes = $this->getTypes();
     // then loop through the fields for chosen content types to get paragraph fields
     $paraFields = []; // content_type[] = field_name
     foreach($contentTypes as $contentType) {
@@ -113,6 +134,17 @@ class ParagraphsReport extends ControllerBase {
       }
     }
     return $paraFields;
+  }
+
+  /**
+   * Get list of content types chosen from settings.
+   *
+   * @return array
+   */
+  public function getTypes() {
+    $moduleConfig = \Drupal::config('paragraphs_report.settings');
+    $types = array_filter($moduleConfig->get('content_types'));
+    return $types;
   }
 
   /**
@@ -130,6 +162,129 @@ class ParagraphsReport extends ControllerBase {
     return $nids;
   }
 
+  /**
+   * Pass node id, return paragraphs report data as array.
+   *
+   * @param $nid
+   * @param $current array of paras to append new ones to
+   *
+   * @return array
+   * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
+   * @throws \Drupal\Component\Plugin\Exception\PluginNotFoundException
+   * @throws \Drupal\Core\Entity\EntityMalformedException
+   */
+  public function getParasFromNid($nid = '', $current = []) {
+    // Pass any current array items into array.
+    $arr = $current;
+    $node = \Drupal::entityTypeManager()->getStorage('node')->load($nid);
+    // @todo review how to get an alias when this is called from hook_node_insert
+    //$alias = $node->toUrl()->toString();
+    // Get and loop through first level paragraph fields on the node.
+    $paraFields = $this->getParaFieldsOnType('node', $node->bundle());
+    foreach($paraFields as $paraField) {
+      // Get paragraph values (target_ids).
+      $paras = $node->get($paraField)->getValue();
+      foreach($paras as $para) {
+        // Load paragraph from target_id.
+        $p = Paragraph::load($para['target_id']);
+        // Add paragraph to report array
+        $arr[$p->bundle()]['top'][] = $nid;
+        // Check if the top level paragraph has sub-paragraph fields.
+        $arr = $this->getParaSubFields($node, $p, $arr);
+      }
+    }
+    return $arr;
+  }
+
+  /**
+   * Helper recursive method to find embedded paragraphs
+   * Send a paragraph, check fields for sub-paragraph fields recursively.
+   *
+   * @return array of paragraph values
+   */
+  public function getParaSubFields($node, $paragraph, $reports) {
+    $alias = $node->toUrl()->toString();
+    $entityManager = \Drupal::service('entity_field.manager');
+    // Get fields on paragraph and check field type.
+    $fields = $entityManager->getFieldDefinitions('paragraph', $paragraph->bundle());
+    foreach ($fields as $field_name => $field_definition) {
+      // Is this field a paragraph type?
+      if (!empty($field_definition->getTargetBundle()) && $field_definition->getSetting('target_type') == 'paragraph') {
+        // Get paragraphs on this field.
+        $paras = $paragraph->get($field_name)->getValue();
+        foreach ($paras as $para) {
+          $p = Paragraph::load($para['target_id']);
+          // If yes, add this field to report and check for more sub-fields.
+          // arr[main component][parent] = alias of node
+          $reports[$p->bundle()][$paragraph->bundle()][] = $node->id();
+          $reports = $this->getParaSubFields($node, $p, $reports);
+        }
+      }
+    }
+    return $reports;
+  }
+
+  /**
+   * Get a list of the paragraph components and return as lookup array.
+   *
+   * @return array of machine name => label
+   */
+  public function getParaTypes(){
+    $paras = paragraphs_type_get_types();
+    $names = [];
+    foreach($paras as $machine => $obj) {
+      $names[$machine] = $obj->label();
+    }
+    return $names;
+  }
+
+
+  // E D I T - C O N F I G - - - - - - - - - - - - - - - - - - //
+
+
+  /**
+   * Pass array of path data to save for the report.
+   *
+   * @param array $arr of paragraph->parent->path data.
+   */
+  public function configSaveReport($arr = []) {
+    $moduleConfig = \Drupal::service('config.factory')->getEditable('paragraphs_report.settings');
+    $json = Json::encode($arr);
+    $moduleConfig->set('report', $json)->save();
+  }
+
+  /**
+   * Remove a node path from report data.
+   *
+   * @param string $removeNid to remove from report data
+   * @return array updated encoded data.
+   */
+  public function configRemoveNode($removeNid = '') {
+    $moduleConfig = \Drupal::config('paragraphs_report.settings');
+    $json = Json::decode($moduleConfig->get('report'));
+    // force type to be array
+    $json = is_array($json) ? $json : [];
+    // Search for nid and remove from array.
+    // remove item from array
+    $new = [];
+    foreach($json as $para => $sets) {
+      foreach($sets as $parent => $nids) {
+        // remove nid from array
+        $tmp = [];
+        foreach($nids as $nid) {
+          if($nid != $removeNid) {
+            $tmp[] = $nid;
+          }
+        }
+        $new[$para][$parent] = $tmp;
+      }
+    }
+    // Save updated array.
+    $this->configSaveReport($new);
+    return $new;
+  }
+
+
 
   // R E P O R T - - - - - - - - - - - - - - - - - - - - - - - //
 
@@ -142,16 +297,12 @@ class ParagraphsReport extends ControllerBase {
   public function filterForm() {
     // Build filter form.
     // Check and set filters
-    $paras = paragraphs_type_get_types();
-    $names = [];
-    foreach($paras as $machine => $obj) {
-      $names[$machine] = $obj->label();
-    }
+    $paraNames = $this->getParaTypes();
     $current_path = \Drupal::service('path.current')->getPath();
     $filterForm = '<form method="get" action="' . $current_path . '">';
     $filterForm .= 'Filter by Type: <select name="ptype">';
     $filterForm .= '<option value="">All</option>';
-    foreach ($names as $machine => $label) {
+    foreach ($paraNames as $machine => $label) {
       $selected = isset($_GET['ptype']) && $_GET['ptype'] == $machine ? ' selected' : '';
       $filterForm .= '<option name="' . $machine . '" value="' . $machine . '"' . $selected . '>' . $label . '</option>';
     }
@@ -166,6 +317,7 @@ class ParagraphsReport extends ControllerBase {
    * @return array
    */
   public function formatTable($json = []) {
+    $paraNames = $this->getParaTypes();
     // get filter
     $filter = isset($_GET['ptype']) ? trim($_GET['ptype']) : '';
     // get paragraphs label info, translate machine name to label
@@ -178,14 +330,18 @@ class ParagraphsReport extends ControllerBase {
         if(!empty($filter) && $filter != $name) {
           continue;
         }
-        $total++;
         // be mindful of the parent field
-        foreach($set as $parent => $paths) {
+        foreach($set as $parent => $nids) {
           // turn duplicates into counts
-          $counts = array_count_values($paths);
-          foreach($counts as $path => $count) {
-            $link = t('<a href="@path">@path</a>',['@path' => $path]);
-            $rows[] = [$name, $parent, $link, $count];
+          if(!empty($nids)) {
+            $counts = array_count_values($nids);
+            foreach($counts as $nid => $count) {
+              $alias = \Drupal::service('path.alias_manager')->getAliasByPath('/node/'.$nid);
+              $link = t('<a href="@alias">@alias</a>',['@alias' => $alias]);
+              $label = $paraNames[$name];
+              $rows[] = [$label, $parent, $link, $count];
+              $total++;
+            }
           }
         }
       }
@@ -229,6 +385,7 @@ class ParagraphsReport extends ControllerBase {
       '#markup' => t('<div style="float:right"><a class="button" href="/admin/reports/paragraphs-report/update" onclick="return confirm(\'Update the report data with current node info?\')">Update Report Data</a></div>')
     ];
     $json = Json::decode($moduleConfig->get('report'));
+    $json = is_array($json) ? $json : []; // force type to be array
     $filters = [];
     $filters['filter'] = [
       '#type' => 'markup',

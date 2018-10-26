@@ -19,6 +19,6 @@ paragraphs_report.data:
   path: '/admin/reports/paragraphs-report/update'
   defaults:
     _title: 'Update Paragraphs Report'
-    _controller: '\Drupal\paragraphs_report\Controller\ParagraphsReport::runReport'
+    _controller: '\Drupal\paragraphs_report\Controller\ParagraphsReport::batchRunReport'
   requirements:
     _permission: 'administer hc_offers configuration'

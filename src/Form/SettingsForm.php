@@ -1,5 +1,10 @@
 <?php
 
+/**
+ * @file
+ * Contains SettingsForm.module.
+ */
+
 namespace Drupal\paragraphs_report\Form;
 
 use Drupal\Core\Form\ConfigFormBase;
@@ -53,6 +58,13 @@ class SettingsForm extends ConfigFormBase {
       '#default_value' => $moduleConfig->get('import_rows_per_batch') ?? 10
     );
 
+    $form['watch_content'] = array(
+      '#type' => 'checkbox',
+      '#title' => $this->t('Watch for content changes and update report data'),
+      '#description'   => t('If enabled, any node save/delete will update Paragraphs Report data.'),
+      '#default_value' => $moduleConfig->get('watch_content') ?? FALSE
+    );
+
     // @todo add paragraph checks on entity fields?
     //       what would the path be to an entity? just the edit form?
     // get list of entities to report on
@@ -89,6 +101,7 @@ class SettingsForm extends ConfigFormBase {
     $this->config('paragraphs_report.settings')
       ->set('content_types', $form_state->getValue('content_types'))
       ->set('import_rows_per_batch', $form_state->getValue('import_rows_per_batch'))
+      ->set('watch_content', $form_state->getValue('watch_content'))
       ->save();
     parent::submitForm($form, $form_state);
   }
