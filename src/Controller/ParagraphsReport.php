@@ -143,7 +143,8 @@ class ParagraphsReport extends ControllerBase {
    */
   public function getTypes() {
     $moduleConfig = \Drupal::config('paragraphs_report.settings');
-    $types = array_filter($moduleConfig->get('content_types'));
+    $data = $moduleConfig->get('content_types') ?? [];
+    $types = array_filter($data);
     return $types;
   }
 
